@@ -25,7 +25,37 @@ sheet.cell(0, 1).value = "Hello"
 workbook.save("hello_world.xlsx")
 ```
 
-More examples: https://github.com/khchen/xl/tree/master/examples.
+Load, modify, and write back to xlsx.
+```nim
+import xl
+
+var workbook = xl.load("filename.xlsx")
+var sheet = workbook.active
+
+# Read the value of a cell.
+echo sheet.cell("A1").value
+
+# Read the number of a cell
+echo sheet.cell("A1").number
+
+# Modify style and value.
+sheet.cell("A1").value = "Hello"
+sheet.cell("A1").font = XlFont(size: 14.0, bold: true)
+
+# Read the style of a cell, the output is vaild nim object construction expression.
+echo sheet.cell("A1").style # all style, include number format, font, fill, etc.
+echo sheet.cell("A1").font # font style only
+
+assert $sheet.cell("A1").font == """XlFont(size: 14.0, bold: true)"""
+
+# Reset to default style.
+sheet.cell("A2").style = default(XlStyle)
+
+# After modifing, the workbook can be save into another file.
+workbook.save("another.xlsx")
+```
+
+More examples: https://github.com/khchen/xl/tree/main/examples.
 
 ## Performance
 
