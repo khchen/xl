@@ -2838,6 +2838,10 @@ proc sheet*(xw: XlWorkbook, name: string): XlSheet =
 
   raise newException(XlError, name & " not found")
 
+proc sheet*(x: XlCell|XlRow|XlCol|XlRange|XlCollection): XlSheet {.inline.} =
+  ## Return the sheet of these objects.
+  return x.sheet
+
 proc `[]`*(xw: XlWorkbook, index: int): XlSheet {.inline.} =
   ## Return the sheet at specified index in a workbook.
   ## Syntactic sugar of sheet().
@@ -2910,7 +2914,9 @@ iterator sheetNames*(xw: XlWorkbook): string =
 
 iterator cells*(xw: XlWorkbook, index: int): XlCell =
   ## The fastest way to iterate over cells of a sheet.
-  ## The yield cells are readonly.
+  ## The yield cells are readonly and empty cells may be skipped.
+  ## Check `cell.rc` carefully during iteration to avoid problem.
+  ## This may be changed in the future.
   let index = xw.standardizeIndex(index)
   var xs = xw.sheets[index]
   if xs.isParsed:
@@ -2943,7 +2949,9 @@ iterator cells*(xw: XlWorkbook, index: int): XlCell =
 
 iterator cells*(xw: XlWorkbook, name: string): XlCell =
   ## The fastest way to iterate over cells of a sheet.
-  ## The yield cells are readonly.
+  ## The yield cells are readonly and empty cells may be skipped.
+  ## Check `cell.rc` carefully during iteration to avoid problem.
+  ## This may be changed in the future.
   var found = -1
   for i, s in xw.sheets:
     if s.name == name:
@@ -3390,7 +3398,8 @@ iterator rows*(xs: XlSheet, restrict = false): XlRow =
   ## Both rows in dimension of sheet and rows with custom settings will be yield.
   ## If restrict is true, only rows in dimension of sheet will be yield.
   var all: HashSet[int]
-  for r in xs.first.row..xs.last.row: all.incl r
+  for r in xs.first.row..xs.last.row:
+    if r >= 0: all.incl r
   for r in xs.rows.keys: all.incl r
 
   for r in all.sortedItems:
@@ -3404,7 +3413,8 @@ iterator cols*(xs: XlSheet, restrict = false): XlCol =
   ## Both columns in dimension of sheet and columns with custom settings will be yield.
   ## If restrict is true, only columns in dimension of sheet will be yield.
   var all: HashSet[int]
-  for c in xs.first.col..xs.last.col: all.incl c
+  for c in xs.first.col..xs.last.col:
+    if c >= 0: all.incl c
   for c in xs.cols.keys: all.incl c
 
   for c in all.sortedItems:

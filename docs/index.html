@@ -807,7 +807,9 @@ window.addEventListener('DOMContentLoaded', main);
 
   </ul>
   <ul class="simple nested-toc-section">sheet
-      <li><a class="reference" href="#sheet%2CXlWorkbook%2Cint"
+      <li><a class="reference" href="#sheet"
+    title="sheet(x: XlCell | XlRow | XlCol | XlRange | XlCollection): XlSheet">sheet(x: XlCell | XlRow | XlCol | XlRange | XlCollection): XlSheet</a></li>
+  <li><a class="reference" href="#sheet%2CXlWorkbook%2Cint"
     title="sheet(xw: XlWorkbook; index: int): XlSheet">sheet(xw: XlWorkbook; index: int): XlSheet</a></li>
   <li><a class="reference" href="#sheet%2CXlWorkbook%2Cstring"
     title="sheet(xw: XlWorkbook; name: string): XlSheet">sheet(xw: XlWorkbook; name: string): XlSheet</a></li>
@@ -2621,6 +2623,14 @@ Save XlWorkbook object into a xlsx or xltx file.
 
 </dd>
 </div>
+<div id="sheet">
+<dt><pre><span class="Keyword">proc</span> <a href="#sheet"><span class="Identifier">sheet</span></a><span class="Other">(</span><span class="Identifier">x</span><span class="Other">:</span> <a href="xl.html#XlCell"><span class="Identifier">XlCell</span></a> <span class="Operator">|</span> <a href="xl.html#XlRow"><span class="Identifier">XlRow</span></a> <span class="Operator">|</span> <a href="xl.html#XlCol"><span class="Identifier">XlCol</span></a> <span class="Operator">|</span> <a href="xl.html#XlRange"><span class="Identifier">XlRange</span></a> <span class="Operator">|</span> <a href="xl.html#XlCollection"><span class="Identifier">XlCollection</span></a><span class="Other">)</span><span class="Other">:</span> <a href="xl.html#XlSheet"><span class="Identifier">XlSheet</span></a> {.<span class="Identifier">inline</span>.}</pre></dt>
+<dd>
+
+Return the sheet of these objects.
+
+</dd>
+</div>
 <div id="sheet,XlWorkbook,int">
 <dt><pre><span class="Keyword">proc</span> <a href="#sheet%2CXlWorkbook%2Cint"><span class="Identifier">sheet</span></a><span class="Other">(</span><span class="Identifier">xw</span><span class="Other">:</span> <a href="xl.html#XlWorkbook"><span class="Identifier">XlWorkbook</span></a><span class="Other">;</span> <span class="Identifier">index</span><span class="Other">:</span> <span class="Identifier">int</span><span class="Other">)</span><span class="Other">:</span> <a href="xl.html#XlSheet"><span class="Identifier">XlSheet</span></a> {.<span><span class="Other pragmadots">...</span></span><span class="pragmawrap"><span class="Identifier">raises</span><span class="Other">:</span> <span class="Other">[</span><span class="Identifier">XlError</span><span class="Other">,</span> <span class="Identifier">IOError</span><span class="Other">,</span>
     <span class="Identifier">OSError</span><span class="Other">,</span> <span class="Identifier">Exception</span><span class="Other">,</span> <span class="Identifier">ValueError</span><span class="Other">,</span> <span class="Identifier">KeyError</span><span class="Other">,</span> <span class="Identifier">XmlError</span><span class="Other">]</span><span class="Other">,</span>
@@ -2773,7 +2783,7 @@ Set width of a column. Assign -1 to reset to default.
     <span class="Identifier">tags</span><span class="Other">:</span> <span class="Other">[</span><span class="Identifier">ReadIOEffect</span><span class="Other">,</span> <span class="Identifier">WriteIOEffect</span><span class="Other">,</span> <span class="Identifier">RootEffect</span><span class="Other">]</span></span>.}</pre></dt>
 <dd>
 
-The fastest way to iterate over cells of a sheet. The yield cells are readonly.
+The fastest way to iterate over cells of a sheet. The yield cells are readonly and empty cells may be skipped. Check <tt class="docutils literal"><span class="pre"><span class="Identifier">cell</span><span class="Operator">.</span><span class="Identifier">rc</span></span></tt> carefully during iteration to avoid problem. This may be changed in the future.
 
 </dd>
 </div>
@@ -2783,7 +2793,7 @@ The fastest way to iterate over cells of a sheet. The yield cells are readonly.
     <span class="Identifier">tags</span><span class="Other">:</span> <span class="Other">[</span><span class="Identifier">ReadIOEffect</span><span class="Other">,</span> <span class="Identifier">WriteIOEffect</span><span class="Other">,</span> <span class="Identifier">RootEffect</span><span class="Other">]</span></span>.}</pre></dt>
 <dd>
 
-The fastest way to iterate over cells of a sheet. The yield cells are readonly.
+The fastest way to iterate over cells of a sheet. The yield cells are readonly and empty cells may be skipped. Check <tt class="docutils literal"><span class="pre"><span class="Identifier">cell</span><span class="Operator">.</span><span class="Identifier">rc</span></span></tt> carefully during iteration to avoid problem. This may be changed in the future.
 
 </dd>
 </div>

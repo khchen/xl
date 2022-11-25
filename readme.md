@@ -25,7 +25,7 @@ sheet.cell(0, 1).value = "Hello"
 workbook.save("hello_world.xlsx")
 ```
 
-Load, modify, and write back to xlsx.
+Load, modify, and write back to xlsx:
 ```nim
 import xl
 
@@ -61,7 +61,22 @@ More examples: https://github.com/khchen/xl/tree/main/examples.
 
 Not bad....
 
-Create or load workbook with `experimental=true` or use `cells` iterator for workbook to get best performance.
+Create or load workbook with `experimental=true` or use [cells](https://khchen.github.io/xl/#cells.i%2CXlWorkbook%2Cint "cells") iterator for workbook to get best performance.
+
+The following code can parse [large.xlsx](https://github.com/theorchard/openpyxl/blob/master/openpyxl/benchmarks/files/large.xlsx "large.xlsx") less than 5 seconds on my computer.
+
+```nim
+import xl
+
+var workbook = xl.load("large.xlsx", experimental=true)
+var total = 0.0
+
+for cell in workbook.cells("Sheet1"):
+  if cell.isNumber:
+    total += cell.number
+```
+
+`nim r -d:release -d:danger --opt:speed -d:lto large.nim`
 
 ## Docs
 * https://khchen.github.io/xl
