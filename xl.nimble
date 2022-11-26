@@ -6,7 +6,7 @@
 #====================================================================
 
 # Package
-version       = "1.0.1"
+version       = "1.1.0"
 author        = "Ward"
 description   = "Xl - Open XML Spreadsheet (Excel) Library for Nim"
 license       = "MIT"

@@ -76,7 +76,12 @@ for cell in workbook.cells("Sheet1"):
     total += cell.number
 ```
 
-`nim r -d:release -d:danger --opt:speed -d:lto large.nim`
+```
+# Nim Compiler Version 1.6.8
+nim r -d:release -d:danger --opt:speed -d:lto --gc:arc large.nim
+```
+
+
 
 ## Docs
 * https://khchen.github.io/xl

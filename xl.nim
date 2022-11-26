@@ -10,13 +10,12 @@
 # TODO
 #  - freeze panes
 #  - cell selection
-#  - image? comment? chart ?
+#  - image? comment? chart?
 
+import xl/private/xn
 import zippy/ziparchives
-import std/[strutils, os, parsexml, xmltree, tables, options, strscans,
-  strtabs, algorithm, critbits, sets, hashes, streams, times]
-
-import xmlparser {.all.}
+import std/[strutils, os, tables, options, strscans, strtabs, algorithm,
+  critbits, sets, hashes, streams, times]
 
 template `/`(x: string): string =
   '/' & x
@@ -92,22 +91,11 @@ type
   XlError* = object of CatchableError
     ## Default error object.
 
-  XlNsName = object
-    ns: Hash
-    name: string
-
   XlRC* = tuple[row: int, col: int]
     ## Represent a cell position.
 
   XlRCRC* = tuple[first: XlRC, last: XlRC]
     ## Represent a range.
-
-  XlNode {.acyclic.} = ref object
-    xml: XmlNode
-    nstag: XlNsName
-    children: seq[XlNode]
-    childrenOk: bool
-    ns: Table[string, Hash]
 
   XlObject = ref object
     raw: string
@@ -235,6 +223,11 @@ type
     row: int
     height: float
     hidden: bool
+    outlineLevel: int
+    collapsed: bool
+    thickTop: bool
+    thickBot: bool
+    ph: bool
 
   XlCol* = ref object of XlStylable
     ## Represent a column of a sheet.
@@ -456,389 +449,6 @@ iterator sortedPairs[A, B](t: var Table[A, B]): (A, var B) =
   for p in s:
     yield (p[0], p[1][])
 
-proc find(x: var XmlParser, kind: XmlEventKind): bool =
-  while true:
-    if x.kind == kind: return true
-    elif x.kind in {xmlError, xmlEof}: return false
-    x.next()
-
-proc find(x: var XmlParser, tags: openArray[string]): int =
-  while true:
-    case x.kind
-    of xmlElementStart, xmlElementOpen:
-      for i, tag in tags:
-        if x.elementName == tag:
-          return i
-
-    of xmlError, xmlEof:
-      return -1
-
-    else:
-      discard
-
-    x.next()
-
-proc parseIgnoreChild(x: var XmlParser): XmlNode =
-  assert x.kind in {xmlElementStart, xmlElementOpen}
-  result = newElement(x.elementName)
-  result.attrs = newStringTable()
-  while true:
-    x.next()
-    if x.kind == xmlAttribute:
-      result.attrs[x.attrKey] = x.attrValue
-    else:
-      break
-
-proc dup(x: XmlNode): XmlNode =
-  case x.kind
-  of xnElement:
-    result = newElement(x.tag)
-    if x.attrs != nil:
-      result.attrs = {:}.toXmlAttributes
-      for key, val in x.attrs:
-        result.attrs[key] = val
-
-    for i in x:
-      result.add i.dup()
-
-  of xnText: result = newText(x.text)
-  of xnCData: result = newCData(x.text)
-  of xnEntity: result = newEntity(x.text)
-  of xnComment: result = newComment(x.text)
-  else: discard
-
-template hasChild(x: XmlNode, tag: string, sym: untyped): bool =
-  var sym: XmlNode
-  if x.isNil:
-    false
-  else:
-    sym = x.child(tag)
-    sym != nil
-
-template hasAttr(x: XmlNode, name: string, sym: untyped): bool =
-  var sym: string
-  if x.isNil:
-    false
-  else:
-    sym = x.attr(name)
-    sym != ""
-
-template hasIntAttr(x: XmlNode, name: string, sym: untyped): bool =
-  var sym: int
-  try:
-    sym = parseInt(x.attr(name))
-    true
-  except:
-    false
-
-template hasFloatAttr(x: XmlNode, name: string, sym: untyped): bool =
-  var sym: float
-  try:
-    sym = parseFloat(x.attr(name))
-    true
-  except:
-    false
-
-template hasTrueAttr(x: XmlNode, name: string): bool =
-  try:
-    x.attr(name) == "true" or (bool parseInt(x.attr(name)))
-  except:
-    false
-
-iterator find(x: XmlNode, name: string): XmlNode =
-  for child in x:
-    if child.kind == xnElement and child.tag == name:
-      yield child
-
-proc `[]=`(x: XmlNode, key: string, value: string) {.inline.} =
-  assert not x.isNil
-  if x.attrs.isNil:
-    x.attrs = {key: value}.toXmlAttributes
-  else:
-    x.attrs[key] = value
-
-
-template `\`(a: static[string], b: string): XlNsName =
-  const h = hash a
-  XlNsName(ns: h, name: b)
-
-proc updateNameSpace(x: XlNode) =
-  if x.xml.attrs.isNil: return
-  for attr, val in x.xml.attrs:
-    if attr == "xmlns":
-      x.ns[""] = val.hash
-
-    elif attr.startsWith "xmlns:":
-      let ns = attr[6..^1]
-      x.ns[ns] = val.hash
-
-proc dup(x: XlNode): XlNode {.inline.} =
-  result = XlNode(xml: x.xml.dup, nstag: x.nstag, ns: x.ns)
-
-proc newXlNode(xml: XmlNode): XlNode =
-  assert xml.kind == xnElement
-  result = XlNode(xml: xml)
-  result.updateNameSpace()
-
-proc childXlNode(x: XlNode, xml: XmlNode): XlNode =
-  assert xml.kind == xnElement
-  result = XlNode(xml: xml, ns: x.ns)
-  result.updateNameSpace()
-
-proc nsname(x: XlNode, nsname: XlNsName): string =
-  if not x.isNil:
-    for prefix, ns in x.ns:
-      if ns == nsname.ns:
-        if prefix == "":
-          return nsname.name
-        else:
-          return prefix & ':' & nsname.name
-
-  return nsname.name
-
-proc prepareChildren(x: XlNode) =
-  if not x.childrenOk:
-    for i in x.xml:
-      if i.kind == xnElement:
-        x.children.add x.childXlNode(i)
-    x.childrenOk = true
-
-iterator items(x: XlNode): XlNode =
-  x.prepareChildren()
-  for child in x.children:
-    yield child
-
-iterator pairs(x: XlNode): (int, XlNode) =
-  var index = 0
-  for n in x:
-    yield (index, n)
-    index.inc
-
-proc len(x: XlNode): int {.inline.} =
-  x.prepareChildren()
-  return x.children.len
-
-proc `[]`(x: XlNode, i: int): XlNode {.inline.} =
-  x.prepareChildren()
-  return x.children[i]
-
-proc `[]`(n: XlNode, i: BackwardsIndex): XlNode {.inline.} =
-  n[n.len - int(i)]
-
-proc tag(x: XlNode): XlNsName =
-  if x.nstag.name == "":
-    let tup = x.xml.tag.split(':')
-    if tup.len == 2 and tup[0] in x.ns:
-      x.nstag = XlNsName(name: tup[1], ns: x.ns[tup[0]])
-
-    elif "" in x.ns:
-      x.nstag = XlNsName(name: x.xml.tag, ns: x.ns[""])
-
-    else:
-      x.nstag = XlNsName(name: x.xml.tag, ns: "".hash)
-
-  return x.nstag
-
-iterator find(x: XlNode, tag: XlNsName): XlNode =
-  for child in x:
-    if child.tag == tag:
-      yield child
-
-proc find(x: XlNode, tag: XlNsName): int =
-  for i, child in x:
-    if child.tag == tag:
-      return i
-  return -1
-
-proc child(x: XlNode, tag: XlNsName): XlNode =
-  for child in x:
-    if child.tag == tag:
-      return child
-
-proc addChild(x: XlNode, child: XlNode, index = -1) =
-  x.prepareChildren()
-  if index < 0:
-    x.xml.add(child.xml)
-    x.children.add child
-
-  else:
-    var
-      pos = 0
-      count = index
-
-    for xml in x.xml:
-      if xml.kind == xnElement:
-        if count == 0:
-          break
-        else:
-          count.dec()
-      pos.inc()
-
-    x.xml.insert(child.xml, pos)
-    x.children.insert(child, index)
-
-proc replaceChild(x: XlNode, child: XlNode, index = -1) =
-  var found = x.find(child.tag)
-  if found < 0:
-    x.addChild(child, index)
-
-  else:
-    var count = found
-
-    for xml in x.xml.mitems:
-      if xml.kind == xnElement:
-        if count == 0:
-          xml = child.xml
-          x.children[found] = child
-          return
-        else:
-          count.dec()
-
-    # not found??
-    # assert false
-
-proc delete(x: XlNode, index: int) =
-  assert index in 0..<x.len
-  var
-    pos = 0
-    count = index
-
-  for xml in x.xml:
-    if xml.kind == xnElement:
-      if count == 0:
-        x.xml.delete pos
-        x.children.delete index
-        return
-      else:
-        count.dec()
-    pos.inc()
-
-proc deleteChild(x: XlNode, tag: XlNsName) =
-  var index = x.find(tag)
-  if index >= 0:
-    x.delete(index)
-
-proc newEmptyChild(x: XlNode, tag: XlNsName, kvs: varargs[tuple[key, val: string]]): XlNode =
-  let xml = newElement(x.nsname(tag))
-  if kvs.len != 0:
-    xml.attrs = kvs.toXmlAttributes
-  return x.childXlNode(xml)
-
-proc addEmptyChild(x: XlNode, tag: XlNsName, index = -1,
-    kvs: varargs[tuple[key, val: string]]): XlNode {.discardable.} =
-  let child = x.newEmptyChild(tag, kvs)
-  x.addChild(child, index)
-  return child
-
-proc newTextChild(x: XlNode, tag: XlNsName, text: string): XlNode =
-  let xml = newElement(x.nsname(tag))
-  xml.add(newText(text))
-  return x.childXlNode(xml)
-
-proc addTextChild(x: XlNode, tag: XlNsName, text: string,
-    index = -1): XlNode {.discardable.} =
-  let child = x.newTextChild(tag, text)
-  x.addChild(child, index)
-  return child
-
-template hasChild(x: XlNode, tag: XlNsName, sym: untyped): bool =
-  var sym: XlNode
-  if x.isNil:
-    false
-  else:
-    for n in x.find(tag):
-      sym = n
-      break
-    sym != nil
-
-template hasChildN(x: XlNode, tag: XlNsName, n: int, sym: untyped): bool =
-  var sym: XlNode
-  if x.isNil:
-    false
-  else:
-    let c = x.child(tag)
-    if not c.isNil and n < c.len:
-      sym = c[n]
-      true
-    else:
-      false
-
-template hasChild(x: XlNode, tag: XlNsName): bool =
-  if x.isNil:
-    false
-  else:
-    x.child(tag) != nil
-
-template editChild(x: XlNode, tag: XlNsName, sym: untyped, index: int, body: untyped): untyped =
-  if not x.isNil:
-    var sym = x.child(tag)
-    if sym.isNil:
-      sym = x.addEmptyChild(tag, index)
-
-    body
-
-proc `[]`(x: XlNode, key: string): string {.inline.} =
-  return x.xml.attr(key)
-
-proc `[]`(x: XlNode, key: XlNsName): string =
-  if x.xml.attrs.isNil: return ""
-
-  let defaultNs = if "" in x.ns: x.ns[""] else: Hash 0
-
-  for attr, val in x.xml.attrs:
-    let tup = attr.split(':')
-    if tup.len == 2 and tup[0] in x.ns and
-        key == XlNsName(name: tup[1], ns: x.ns[tup[0]]):
-      return val
-
-    elif defaultNs != 0 and
-        key == XlNsName(name: attr, ns: defaultNs):
-      return val
-
-  # attribute without namespace can match any namespace?
-  return x[key.name]
-
-proc `[]=`(x: XlNode, key: string, value: string) {.inline.} =
-  assert not x.isNil
-  if x.xml.attrs.isNil:
-    x.xml.attrs = {key: value}.toXmlAttributes
-  else:
-    x.xml.attrs[key] = value
-
-proc `[]=`(x: XlNode, key: XlNsName, value: string) {.inline.} =
-  x[x.nsname(key)] = value
-
-proc deleteAttr(x: XlNode, name: string) {.inline.} =
-  if x.xml.attrs != nil:
-    x.xml.attrs.del name
-
-template hasAttr(x: XlNode, attr: XlNsName|string, sym: untyped): bool =
-  var sym = x[attr]
-  sym != ""
-
-template hasIntAttr(x: XlNode, attr: XlNsName|string, sym: untyped): bool =
-  var sym: int
-  try:
-    sym = parseInt(x[attr])
-    true
-  except:
-    false
-
-template hasFloatAttr(x: XlNode, attr: XlNsName|string, sym: untyped): bool =
-  var sym: float
-  try:
-    sym = parseFloat(x[attr])
-    true
-  except:
-    false
-
-template hasTrueAttr(x: XlNode, attr: XlNsName|string): bool =
-  try:
-    let val = x[attr]
-    val == "true" or (bool parseInt(val))
-  except:
-    false
-
 template hasBoolOptionAttr(x: XlNode, attr: XlNsName|string): Option[bool] =
   let val = x[attr]
   case val
@@ -854,9 +464,6 @@ template hasBoolOptionAttr(x: XlNode, attr: XlNsName|string): Option[bool] =
     except:
       none(bool)
 
-proc innerText(x: XlNode): string {.inline.} =
-  return x.xml.innerText
-
 proc `[]=`[T](x: XlNode, key: string, opt: Option[T]) {.inline.} =
   if opt.isSome:
     when T is string|SomeNumber:
@@ -868,45 +475,30 @@ proc `[]=`[T](x: XlNode, key: string, opt: Option[T]) {.inline.} =
     else:
       {.error: "unknow type " & $T.}
 
-proc addNameSpace(x: XlNode, ns: string, prefix = "") =
-  if prefix != "":
-    x["xmlns:" & prefix] = ns
-  else:
-    x["xmlns"] = ns
-  x.updateNameSpace()
-
-proc newEmptyNode(ns: string, tag: string, prefix = ""): XlNode =
-  result = newXlNode(<>tmp())
-  result.addNameSpace(ns, prefix)
-  if prefix != "":
-    result.xml.tag = prefix & ':' & tag
-  else:
-    result.xml.tag = tag
-
-proc expand(x: XlNode, ns: static[string], order: openarray[string]) =
+proc expand(x: XlNode, ns: string, order: openarray[string]) =
   var
     cursor = 0
     index = 0
 
   while cursor < order.len:
-    if index >= x.len:
-      x.addEmptyChild(ns\order[cursor], -1)
+    if index >= x.count:
+      discard x.addChildXlNode(ns\order[cursor])
 
-    elif x[index].tag.ns != ns.hash:
+    elif x[index].tag.ns != ns: # skip tag for other namespace
       index.inc
       continue
 
     elif x[index].tag != ns\order[cursor]:
-      x.addEmptyChild(ns\order[cursor], index)
+      discard x.addChildXlNode(ns\order[cursor], index)
 
     cursor.inc
     index.inc
 
-proc shrink(x: XlNode, ns: static[string], preserves: openarray[string]) =
-  for i in countdown(x.len - 1, 0):
+proc shrink(x: XlNode, ns: string, preserves: openarray[string]) =
+  for i in countdown(x.count - 1, 0):
     let child = x[i]
     var isDelete = true
-    if child.len == 0 and (child.xml.attrs == nil or child.xml.attrs.len == 0):
+    if child.count == 0 and (child.attrs == nil or child.attrs.len == 0):
       for tag in preserves:
         if child.tag == ns\tag:
           isDelete = false
@@ -916,23 +508,18 @@ proc shrink(x: XlNode, ns: static[string], preserves: openarray[string]) =
         x.delete(i)
 
 proc updateCount(x: XlNode) {.inline.} =
-  x["count"] = $x.len
-
+  x["count"] = $x.count
 
 proc parse(x: XlObject) =
   if x.raw != "" and x.xn.isNil:
-    x.xn = XlNode(xml: parseXml(x.raw, {reportWhitespace}))
-    x.xn.updateNameSpace()
+    x.xn = parseXn(x.raw)
     x.raw = ""
 
-proc newXlObject(x: XlNode): XlObject {.inline.} =
+proc newXlObject(x: sink XlNode): XlObject {.inline.} =
   result = XlObject(xn: x)
 
-proc newXlObject(raw: string): XlObject {.inline.} =
+proc newXlObject(raw: sink string): XlObject {.inline.} =
   result = XlObject(raw: raw)
-
-proc getNode(x: XlObject): XlNode {.inline.} =
-  return x.xn
 
 proc rc*(name: string): XlRC =
   ## Convert cell reference (e.g. "A1") to XlRC tuple.
@@ -1014,13 +601,10 @@ proc isEmpty*(xs: XlSheet): bool {.inline.} =
   ## Check if a sheet is empty or not.
   result = xs.count == 0
 
-proc `$`(x: XlNode): string =
-  return $x.xml
-
 proc `$`(x: XlObject): string =
-  if x.xn != nil and x.xn.xml != nil:
-    result.add xmlHeader
-    result.add(x.xn.xml, indent=0, indWidth=0, addNewLines=false)
+  if x.xn != nil:
+    result.add xlHeader
+    result.add $$x.xn
     if x.postProcess != ("", ""):
       result = result.replace(x.postProcess[0], x.postProcess[1])
   else:
@@ -1160,7 +744,7 @@ proc `{}`(xw: XlWorkbook, file: string): XlNode =
   if file in xw.contents:
     let obj = xw.contents[file]
     obj.parse()
-    return obj.getNode()
+    return obj.xn
   else:
     raise newException(XlError, file & " not found")
 
@@ -1295,7 +879,6 @@ proc validate(align: var XlProtection, error: bool) {.inline.} =
   # nothing to do for XlProtection
   discard
 
-
 proc option[T](x: XlNode, name: XlNsName): Option[T] {.inline.} =
   let val = x[name]
   if val == "":
@@ -1328,7 +911,7 @@ proc parseColor(xColor: XlNode): XlColor =
   validate(result, error=false)
 
 proc newChildColor(x: XlNode, name: XlNsName, color: XlColor): XlNode =
-  result = x.newEmptyChild(name)
+  result = newXlNode(x, name)
   result["auto"] = color.`auto`
   result["rgb"] = color.rgb
   result["indexed"] = color.indexed
@@ -1352,11 +935,9 @@ proc parseAlignment(xStyles: XlNode, style: int): XlAlignment =
     validate(result, error=false)
 
 proc newChildAlignment(x: XlNode, name: XlNsName, align: XlAlignment): XlNode =
-  result = x.newEmptyChild(name)
+  result = newXlNode(x, name)
   result["horizontal"] = align.horizontal
   result["vertical"] = align.vertical
-  # result["textRotation"] = align.textRotation
-
   result["wrapText"] = align.wrapText
   result["shrinkToFit"] = align.shrinkToFit
   result["indent"] = align.indent
@@ -1380,7 +961,7 @@ proc parseProtection(xStyles: XlNode, style: int): XlProtection =
     validate(result, error=false)
 
 proc newChildProtection(x: XlNode, name: XlNsName, protection: XlProtection): XlNode =
-  result = x.newEmptyChild(name)
+  result = newXlNode(x, name)
   result["locked"] = protection.locked
   result["hidden"] = protection.hidden
 
@@ -1403,17 +984,17 @@ proc childSideOption(x: XlNode, name: XlNsName): Option[XlSide] =
 
 proc addChildAttr[T](x: XlNode, name: XlNsName, attr: string, opt: Option[T]) =
   if opt.isSome:
-    var child = x.addEmptyChild(name)
+    var child = x.addChildXlNode(name)
     if attr != "":
       child[attr] = opt
 
 proc addChildColor(x: XlNode, name: XlNsName, color: Option[XlColor]) =
   if color.isSome:
-    x.addChild(x.newChildColor(name, color.get))
+    x.add x.newChildColor(name, color.get)
 
 proc addChildSide(x: XlNode, name: XlNsName, side: Option[XlSide]) =
   if side.isSome:
-    var xSide = x.addEmptyChild(name)
+    var xSide = x.addChildXlNode(name)
     var side = side.get
     xSide["style"] = side.style
     xSide.addChildColor(NsMain\"color", side.color)
@@ -1453,7 +1034,9 @@ proc applyNumFmt(xStyles: XlNode, numFmt: XlNumFmt): int =
       except ValueError: discard
 
     id = max(id + 1, 164)
-    xNumFmts.addEmptyChild(NsMain\"numFmt", -1, {"numFmtId": $id, "formatCode": fmt})
+    discard xNumFmts.addChildXlNode(NsMain\"numFmt", -1,
+      {"numFmtId": $id, "formatCode": fmt}
+    )
     xNumFmts.updateCount()
     return id
 
@@ -1485,9 +1068,9 @@ proc parseFont(xStyles: XlNode, style: int): XlFont =
 
 proc applyFont(xStyles: XlNode, font: XlFont): int =
   xStyles.editChild(NsMain\"fonts", xFonts, 0):
-    let xFont = xFonts.addEmptyChild(NsMain\"font")
+    let xFont = xFonts.addChildXlNode(NsMain\"font")
     xFonts.updateCount()
-    result = xFonts.len - 1
+    result = xFonts.count - 1
 
     xFont.addChildAttr(NsMain\"name", "val", font.name)
     xFont.addChildAttr(NsMain\"charset", "val", font.charset)
@@ -1536,20 +1119,20 @@ proc parseFill(xStyles: XlNode, style: int): XlFill =
 
 proc applyFill(xStyles: XlNode, fill: XlFill): int =
   xStyles.editChild(NsMain\"fills", xFills, 0):
-    let xFill = xFills.addEmptyChild(NsMain\"fill")
+    let xFill = xFills.addChildXlNode(NsMain\"fill")
     xFills.updateCount()
-    result = xFills.len - 1
+    result = xFills.count - 1
 
     if fill.patternFill.isSome:
       var patternFill = fill.patternFill.get
-      var xPattern = xFill.addEmptyChild(NsMain\"patternFill")
+      var xPattern = xFill.addChildXlNode(NsMain\"patternFill")
       xPattern["patternType"] = patternFill.patternType
       xPattern.addChildColor(NsMain\"fgColor", patternFill.fgColor)
       xPattern.addChildColor(NsMain\"bgColor", patternFill.bgColor)
 
     if fill.gradientFill.isSome:
       var gradientFill = fill.gradientFill.get
-      var xGradient = xFill.addEmptyChild(NsMain\"gradientFill")
+      var xGradient = xFill.addChildXlNode(NsMain\"gradientFill")
       xGradient["type"] = gradientFill.gradientType
       xGradient["degree"] = gradientFill.degree
       xGradient["left"] = gradientFill.left
@@ -1557,7 +1140,7 @@ proc applyFill(xStyles: XlNode, fill: XlFill): int =
       xGradient["top"] = gradientFill.top
       xGradient["bottom"] = gradientFill.bottom
       for i, color in gradientFill.stops:
-        var xStop = xGradient.addEmptyChild(NsMain\"stop", -1, {"position": $i})
+        var xStop = xGradient.addChildXlNode(NsMain\"stop", -1, {"position": $i})
         xStop.addChildColor(NsMain\"color", color)
 
 proc parseBorder(xStyles: XlNode, style: int): XlBorder =
@@ -1581,9 +1164,9 @@ proc parseBorder(xStyles: XlNode, style: int): XlBorder =
 
 proc applyBorder(xStyles: XlNode, border: XlBorder): int =
   xStyles.editChild(NsMain\"borders", xBorders, 0):
-    let xBorder = xBorders.addEmptyChild(NsMain\"border")
+    let xBorder = xBorders.addChildXlNode(NsMain\"border")
     xBorders.updateCount()
-    result = xBorders.len - 1
+    result = xBorders.count - 1
 
     xBorder["outline"] = border.outline
     xBorder["diagonalUp"] = border.diagonalUp
@@ -1618,7 +1201,7 @@ proc parseRpr(xRpr: XlNode): XlFont =
   validate(result, error=false)
 
 proc applyRpr(x: XlNode, font: XlFont) =
-  var xRpr = x.addEmptyChild(NsMain\"rPr")
+  var xRpr = x.addChildXlNode(NsMain\"rPr")
   xRpr.addChildAttr(NsMain\"rFont", "val", font.name)
   xRpr.addChildAttr(NsMain\"charset", "val", font.charset)
   xRpr.addChildAttr(NsMain\"family", "val", font.family)
@@ -1636,21 +1219,20 @@ proc applyRpr(x: XlNode, font: XlFont) =
     else:
       xRpr.addChildAttr(NsMain\"u", "val", font.underline)
 
-
 proc value(riches: XlRiches): string =
   for rich in riches:
     result.add rich.text
 
 proc save(riches: XlRiches, x: XlNode, tag: XlNsName): XlNode =
-  result = x.newEmptyChild(tag)
+  result = x.newXlNode(tag)
   for rich in riches:
-    var xr = result.addEmptyChild(NsMain\"r")
+    var xr = result.addChildXlNode(NsMain\"r")
 
     if rich.font != default(XlFont):
       xr.applyRpr(rich.font)
 
     if rich.text != "":
-      var xt = xr.addTextChild(NsMain\"t", rich.text)
+      var xt = xr.addChildXlNode(NsMain\"t", rich.text)
       xt["xml:space"] = "preserve"
 
 proc load(x: var XlRiches, xn: XlNode) =
@@ -1670,19 +1252,19 @@ proc save(s: XlSharedStrings): XlNode =
 
   for text, (index, isNew) in s.table:
     if isNew:
-      var xsi = result.addEmptyChild(NsMain\"si")
-      xsi.addTextChild(NsMain\"t", text)
+      var xsi = result.addChildXlNode(NsMain\"si")
+      discard xsi.addChildXlNode(NsMain\"t", text)
 
 proc reset(s: var XlSharedStrings) {.inline.} =
   s.newCount = 0
   s.table.clear()
 
 proc getRiches(s: XlSharedStrings, index: int): XlRiches {.inline.} =
-  if index < s.xSharedStrings.len:
+  if index < s.xSharedStrings.count:
     result.load(s.xSharedStrings[index])
 
 proc get(s: XlSharedStrings, index: int): string {.inline.} =
-  if index < s.xSharedStrings.len:
+  if index < s.xSharedStrings.count:
     return s.xSharedStrings[index].innerText
 
 proc add(s: var XlSharedStrings, text: string): int =
@@ -1690,7 +1272,7 @@ proc add(s: var XlSharedStrings, text: string): int =
   if tup.index >= 0:
     return tup.index
 
-  let index = s.xSharedStrings.len + s.newCount
+  let index = s.xSharedStrings.count + s.newCount
   s.table[text] = (index, true)
   s.newCount.inc
   return index
@@ -1699,7 +1281,7 @@ proc load(s: var XlSharedStrings, x: XlNode) =
   s.reset()
   s.xSharedStrings = x
 
-  for i, xsi in x:
+  for i, xsi in x.childrenPair:
     if xsi.tag != NsMain\"si": # should not happen, invaild file?
       continue
 
@@ -1709,12 +1291,12 @@ proc load(s: var XlSharedStrings, x: XlNode) =
 proc save(s: var XlSharedStyles): XlNode =
 
   proc addXf(xCellXfs: XlNode, oldStyle: int): XlNode =
-    if oldStyle >= 0 and oldStyle < xCellXfs.len:
+    if oldStyle >= 0 and oldStyle < xCellXfs.count:
       result = xCellXfs[oldStyle].dup()
-      xCellXfs.addChild(result)
+      xCellXfs.add result
 
     else:
-      result = xCellXfs.addEmptyChild(NsMain\"xf", -1,
+      result = xCellXfs.addChildXlNode(NsMain\"xf", -1,
         {"numFmtId": "0", "fontId": "0", "fillId": "0", "borderId": "0"})
 
   proc apply[T](xStyles: XlNode, xf: XlNode, option: Option[T],
@@ -1741,16 +1323,15 @@ proc save(s: var XlSharedStyles): XlNode =
   template applyChild[T](xf: XlNode, sym: untyped, newfn: T, aok: string, index: int): untyped =
     if change.sym.isSome:
       if change.sym.get == default(change.sym.get.type):
-        xf.deleteChild(NsMain\astToStr(sym))
+        xf.delete(NsMain\astToStr(sym))
         xf.deleteAttr(aok)
       else:
-        xf.replaceChild(xf.newfn(NsMain\astToStr(sym), change.sym.get), index)
+        xf.replace(xf.newfn(NsMain\astToStr(sym), change.sym.get), index)
         xf[aok] = "1"
 
   var xStyles = s.xStyles.dup()
   xStyles.addNameSpace(NsMain)
   xStyles.editChild(NsMain\"cellXfs", xCellXfs, -1):
-
     for tup, v in s.styles:
       let (oldStyle, change) = tup
       var xf = xCellXfs.addXf(oldStyle)
@@ -1798,7 +1379,7 @@ proc reset(s: var XlSharedStyles) =
   s.fills.clear()
   s.borders.clear()
   if s.xStyles.hasChild(NsMain\"cellXfs", cellXfs):
-    s.xfCount = cellXfs.len
+    s.xfCount = cellXfs.count
   else:
     s.xfCount = 0
 
@@ -1813,7 +1394,7 @@ proc add(types: var XlTypes, key: string, obj: XlType) {.inline.} =
   types[key] = obj
 
 proc save(types: XlTypes, mime = MimeSheetMain): XlNode =
-  result = newEmptyNode(NsContentTypes, "Types")
+  result = newXlRootNode(NsContentTypes\"Types")
   for key, obj in types:
     var typ = obj.typ
 
@@ -1822,15 +1403,15 @@ proc save(types: XlTypes, mime = MimeSheetMain): XlNode =
       if key.endsWith "xl/workbook.xml":
         typ = mime
 
-      result.addEmptyChild(NsContentTypes\"Override", -1,
+      discard result.addChildXlNode(NsContentTypes\"Override", -1,
         {"PartName": key, "ContentType": typ})
 
     else:
-      result.addEmptyChild(NsContentTypes\"Default", 0,
+      discard result.addChildXlNode(NsContentTypes\"Default", 0,
         {"Extension": key, "ContentType": typ})
 
 proc load(types: var XlTypes, x: XlNode) =
-  for child in x:
+  for child in x.children:
     if child.tag == NsContentTypes\"Default":
       types.add(child["Extension"], child["ContentType"], false)
 
@@ -1878,13 +1459,13 @@ proc load(rels: var XlRels, x: XlNode, path: string) =
     rels[child["Id"]] = rel
 
 proc save(rels: var XlRels): XlNode =
-  result = newEmptyNode(NsRelationships, "Relationships")
+  result = newXlRootNode(NsRelationships\"Relationships")
   for id, rel in rels.sortedPairs:
     var target = rel.target
     if not rel.external and target.startsWith Xl/"":
       target = /target
 
-    result.addEmptyChild(NsRelationships\"Relationship", -1,
+    discard result.addChildXlNode(NsRelationships\"Relationship", -1,
       {"Id": id, "Type": rel.typ, "Target": target})
 
     if rel.external:
@@ -1923,16 +1504,14 @@ proc save(x: XlProperties, core: XlNode, app: XlNode): tuple[core: XlNode, app: 
   result.core.addNameSpace(NsDc, "dc")
   result.core.addNameSpace(NsDcTerms, "dcterms")
   result.core.addNameSpace(NsXSI, "xsi")
-
   result.app.addNameSpace(NsExtendedProperties)
 
   template setText(xn: XlNode, tag: XlNsName, text: string): untyped =
     if text != "":
-      xn.replaceChild(xn.newTextChild(tag, text))
+      xn.replace(xn.newXlNode(tag, text))
     else:
-      xn.deleteChild(tag)
+      xn.delete(tag)
 
-  result.core.setText(NsDc\"title", x.title)
   result.core.setText(NsDc\"title", x.title)
   result.core.setText(NsDc\"subject", x.subject)
   result.core.setText(NsDc\"creator", x.creator)
@@ -2022,29 +1601,34 @@ proc getRootXlNode(xs: XlSheet): XlNode =
   if not x.find(xmlElementOpen):
     raise newException(XlError, "XML parsing error")
 
-  return newXlNode(x.parseIgnoreChild())
+  return x.parseIgnoreChild()
 
-proc parseRow(xs: XlSheet, xml: XmlNode): XlRow =
-  if xml.hasIntAttr("r", r):
+proc parseRow(xs: XlSheet, xn: XlNode): XlRow =
+  if xn.hasIntAttr("r", r):
     r.dec()
     var xr = XlRow(sheet: xs, row: r, height: -1, style: -1)
-    if xml.hasTrueAttr("customFormat") and xml.hasIntAttr("s", s): xr.style = s
-    if xml.hasTrueAttr("customHeight") and xml.hasFloatAttr("ht", ht): xr.height = ht
-    if xml.hasTrueAttr("hidden"): xr.hidden = true
+    if xn.hasTrueAttr("customFormat") and xn.hasIntAttr("s", s): xr.style = s
+    if xn.hasTrueAttr("customHeight") and xn.hasFloatAttr("ht", ht): xr.height = ht
+    if xn.hasTrueAttr("hidden"): xr.hidden = true
+    if xn.hasIntAttr("outlineLevel", ol): xr.outlineLevel = ol
+    if xn.hasTrueAttr("collapsed"): xr.collapsed = true
+    if xn.hasTrueAttr("thickTop"): xr.thickTop = true
+    if xn.hasTrueAttr("thickBot"): xr.thickBot = true
+    if xn.hasTrueAttr("ph"): xr.ph = true
     return xr
 
-proc parseCell(xs: XlSheet, xml: XmlNode,
-    fTag: string, vTag: string, readonly: bool): XlCell =
+proc parseCell(xs: XlSheet, xn: XlNode,
+    fTag: string, vTag: string, isTag: string, readonly: bool): XlCell =
 
-  if xml.hasAttr("r", r):
+  if xn.hasAttr("r", r):
     let rc = r.rc
     var cell = XlCell(sheet: xs, rc: rc, style: -1, readonly: readonly)
 
-    if xml.hasChild(fTag, f): cell.formula = f.innerText
-    if xml.hasChild(vTag, v): cell.value = v.innerText
-    if xml.hasIntAttr("s", s): cell.style = s
+    if xn.hasRawChild(fTag, f): cell.formula = f.innerText
+    if xn.hasRawChild(vTag, v): cell.value = v.innerText
+    if xn.hasIntAttr("s", s): cell.style = s
 
-    case xml.attr("t")
+    case xn.attr("t")
     of "s":
       cell.ct = ctSharedString
       try:
@@ -2064,8 +1648,8 @@ proc parseCell(xs: XlSheet, xml: XmlNode,
     of "str": cell.ct = ctStr
     of "inlineStr":
       cell.ct = ctInlineStr
-      if xml.hasChild("is", xIs):
-        cell.riches.load(newXlNode(xIs))
+      if xn.hasRawChild(isTag, xIs):
+        cell.riches.load(xIs)
         cell.value = cell.riches.value
 
     else: # n or other
@@ -2075,7 +1659,7 @@ proc parseCell(xs: XlSheet, xml: XmlNode,
 
 proc extractSheetData(xs: XlSheet, root: XlNode, remove: bool): string =
   let
-    sheetDataTag = root.nsname(NsMain\"sheetData")
+    sheetDataTag = nsnameToRawName(root, NsMain\"sheetData")
     tagOpen = '<' & sheetDataTag
     tagEnd = '/' & sheetDataTag & '>'
     first = xs.obj.raw.find(tagOpen)
@@ -2092,13 +1676,14 @@ proc parseExperimental(xs: XlSheet) =
   let
     root = xs.getRootXlNode()
     sheetData = xs.extractSheetData(root, remove=true)
-    rowTag = root.nsname(NsMain\"row")
-    cTag = root.nsname(NsMain\"c")
-    fTag = root.nsname(NsMain\"f")
-    vTag = root.nsname(NsMain\"v")
+    rowTag = nsnameToRawName(root, NsMain\"row")
+    cTag = nsnameToRawName(root, NsMain\"c")
+    fTag = nsnameToRawName(root, NsMain\"f")
+    vTag = nsnameToRawName(root, NsMain\"v")
+    isTag = nsnameToRawName(root, NsMain\"is")
 
-  if sheetData == "":
-    raise newException(XlError, "XML parsing error")
+  if sheetData == "": # <sheetData /> or no sheetData
+    return
 
   var
     x: XmlParser
@@ -2114,16 +1699,16 @@ proc parseExperimental(xs: XlSheet) =
 
     case index:
     of 1: # rowTag
-      let xml = x.parseIgnoreChild()
-      if xml != nil:
-        let row = parseRow(xs, xml)
+      let xn = x.parseIgnoreChild()
+      if xn != nil:
+        let row = parseRow(xs, xn)
         if row != nil:
           xs.rows[row.row] = row
 
     of 0: # cTag
-      var xml = x.parse(errors)
-      if xml != nil:
-        let cell = parseCell(xs, xml, fTag, vTag, readonly=false)
+      var xn = x.parse(errors)
+      if xn != nil:
+        let cell = parseCell(xs, xn, fTag, vTag, isTag, readonly=false)
         if cell != nil:
           xs.update(cell)
 
@@ -2134,7 +1719,7 @@ proc parse(xs: XlSheet) =
     xs.parseExperimental()
 
   xs.obj.parse()
-  let xSheet = xs.obj.getNode()
+  let xSheet = xs.obj.xn
 
   if xSheet.hasChild(NsMain\"sheetData", sheetData):
     for xRow in sheetData.find(NsMain\"row"):
@@ -2144,6 +1729,11 @@ proc parse(xs: XlSheet) =
         if xRow.hasTrueAttr(NsMain\"customFormat") and xRow.hasIntAttr(NsMain\"s", s): row.style = s
         if xRow.hasTrueAttr(NsMain\"customHeight") and xRow.hasFloatAttr(NsMain\"ht", ht): row.height = ht
         if xRow.hasTrueAttr(NsMain\"hidden"): row.hidden = true
+        if xRow.hasIntAttr(NsMain\"outlineLevel", ol): row.outlineLevel = ol
+        if xRow.hasTrueAttr(NsMain\"collapsed"): row.collapsed = true
+        if xRow.hasTrueAttr(NsMain\"thickTop"): row.thickTop = true
+        if xRow.hasTrueAttr(NsMain\"thickBot"): row.thickBot = true
+        if xRow.hasTrueAttr(NsMain\"ph"): row.ph = true
         xs.rows[r] = row
 
       for c in xRow.find(NsMain\"c"):
@@ -2250,8 +1840,14 @@ proc saveSheetDataExperimental(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
       if row.height >= 0:
         sheetData.add " customHeight=\"1\" ht=\"" & $row.height & "\""
 
-      if row.hidden:
-        sheetData.add " hidden=\"1\""
+      if row.outlineLevel != 0:
+        sheetData.add " outlineLevel=\"" & $row.outlineLevel & "\""
+
+      if row.hidden: sheetData.add " hidden=\"1\""
+      if row.collapsed: sheetData.add " collapsed=\"1\""
+      if row.thickTop: sheetData.add " thickTop=\"1\""
+      if row.thickBot: sheetData.add " thickBot=\"1\""
+      if row.ph: sheetData.add " ph=\"1\""
 
     cells.sort do (a, b: XlCell) -> int:
       system.cmp(a.rc, b.rc)
@@ -2283,7 +1879,7 @@ proc saveSheetDataExperimental(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
       if cell.ct == ctInlineStr:
         let xn = cell.riches.save(xSheetData, NsMain\"is")
         xml.add " t=\"" & $cell.ct & "\""
-        cellChildren.add(xn.xml, indent=0, indWidth=0, addNewLines=false)
+        cellChildren.add $$xn
         modified = true
 
       else:
@@ -2308,7 +1904,7 @@ proc saveSheetData(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
     rowCells: var Table[int, seq[XlCell]], hyperlinks: var seq[(string, string)]) =
 
   for r, cells in rowCells.sortedPairs:
-    var xRow = xSheetData.addEmptyChild(NsMain\"row", -1, {"r": $(r + 1)})
+    var xRow = xSheetData.addChildXlNode(NsMain\"row", -1, {"r": $(r + 1)})
 
     # write rows data
     let row = xs.rows.getOrDefault(r, nil)
@@ -2322,8 +1918,14 @@ proc saveSheetData(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
         xRow["customHeight"] = "1"
         xRow["ht"] = $row.height
 
-      if row.hidden:
-        xRow["hidden"] = "1"
+      if row.outlineLevel != 0:
+        xRow["outlineLevel"] = $row.outlineLevel
+
+      if row.hidden: xRow["hidden"] = "1"
+      if row.collapsed: xRow["collapsed"] = "1"
+      if row.thickTop: xRow["thickTop"] = "1"
+      if row.thickBot: xRow["thickBot"] = "1"
+      if row.ph: xRow["ph"] = "1"
 
     cells.sort do (a, b: XlCell) -> int:
       system.cmp(a.rc, b.rc)
@@ -2332,11 +1934,11 @@ proc saveSheetData(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
     # should avoid write empty cell node
     for cell in cells:
       let name = cell.rc.name
-      var xCell = xRow.newEmptyChild(NsMain\"c", {"r": name})
+      var xCell = xRow.newXlNode(NsMain\"c", {"r": name})
       var modified = false
       defer:
         if modified:
-          xRow.addChild(xCell)
+          xRow.add xCell
 
       let style = xw.sharedStyles.get(cell)
       if style >= 0:
@@ -2344,12 +1946,12 @@ proc saveSheetData(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
         modified = true
 
       if cell.formula != "":
-        xCell.addTextChild(NsMain\"f", cell.formula)
+        discard xCell.addChildXlNode(NsMain\"f", cell.formula)
         modified = true
 
       if cell.ct == ctInlineStr:
         xCell["t"] = $cell.ct
-        xCell.addChild(cell.riches.save(xCell, NsMain\"is"))
+        xCell.add cell.riches.save(xCell, NsMain\"is")
         modified = true
 
       else:
@@ -2360,10 +1962,10 @@ proc saveSheetData(xw: XlWorkbook, xs: XlSheet, xSheetData: XlNode,
 
           if cell.ct == ctSharedString:
             let index = xw.sharedStrings.add(cell.value)
-            xCell.addTextChild(NsMain\"v", $index)
+            discard xCell.addChildXlNode(NsMain\"v", $index)
 
           else:
-            xCell.addTextChild(NsMain\"v", cell.value)
+            discard xCell.addChildXlNode(NsMain\"v", cell.value)
 
       if cell.hyperlink != "":
         let id = xs.rels.add(TypeHyperlink, cell.hyperlink, true)
@@ -2386,7 +1988,7 @@ proc saveSheets(xw: XlWorkbook) =
 
     # replace old sheet instead of create new one for save memory usage
     # children in sheet must be in order
-    var xSheet = xs.obj.getNode
+    var xSheet = xs.obj.xn
     xSheet.addNameSpace(NsMain)
     xSheet.addNameSpace(NsDocumentRelationships, "r")
     xSheet.expand(NsMain, order)
@@ -2397,11 +1999,11 @@ proc saveSheets(xw: XlWorkbook) =
     # remove old hyperlinks
     xs.rels.removeExternal()
     var
-      xSheetData = xSheet.newEmptyChild(NsMain\"sheetData")
+      xSheetData = xSheet.newXlNode(NsMain\"sheetData")
       rowCells: Table[int, seq[XlCell]]
       hyperlinks: seq[(string, string)]
 
-    xSheet.replaceChild(xSheetData)
+    xSheet.replace(xSheetData)
 
     # collect rows from both xs.cells and xs.rows
     for cell in xs.cells.values:
@@ -2418,23 +2020,23 @@ proc saveSheets(xw: XlWorkbook) =
     # write cols data
     type ColData = tuple[style: int, width: float, hidden: bool]
     if xs.cols.len != 0:
-      var xCols = xSheet.newEmptyChild(NsMain\"cols")
-      xSheet.replaceChild(xCols)
+      var xCols = xSheet.newXlNode(NsMain\"cols")
+      xSheet.replace(xCols)
 
       var last = ColData (-1, -1.0, false)
       for col in xs.cols.sortedValues:
         var
           n = $(col.col + 1)
-          xCol = xCols.newEmptyChild(NsMain\"col", {"min": n, "max": n})
+          xCol = xCols.newXlNode(NsMain\"col", {"min": n, "max": n})
           modified = false
           current = ColData (-1, -1.0, false)
 
         defer:
           if modified:
-            if current == last and xCols.len != 0 and xCols[^1]["max"] == $(col.col):
+            if current == last and xCols.count != 0 and xCols[^1]["max"] == $(col.col):
               xCols[^1]["max"] = n
             else:
-              xCols.addChild(xCol)
+              xCols.add(xCol)
 
           last = current
 
@@ -2460,32 +2062,32 @@ proc saveSheets(xw: XlWorkbook) =
           modified = true
 
     else:
-      xSheet.deleteChild(NsMain\"cols")
+      xSheet.delete(NsMain\"cols")
 
     # write merges data
     if xs.merges.len != 0:
-      var xMergeCells = xSheet.newEmptyChild(NsMain\"mergeCells")
+      var xMergeCells = xSheet.newXlNode(NsMain\"mergeCells")
       for rcrc in xs.merges:
-        xMergeCells.addEmptyChild(NsMain\"mergeCell", -1, {"ref": rcrc.name})
+        discard xMergeCells.addChildXlNode(NsMain\"mergeCell", -1, {"ref": rcrc.name})
 
       xMergeCells.updateCount()
-      xSheet.replaceChild(xMergeCells)
+      xSheet.replace(xMergeCells)
 
     else:
-      xSheet.deleteChild(NsMain\"mergeCells")
+      xSheet.delete(NsMain\"mergeCells")
 
     # write hyperlinks data
     if hyperlinks.len != 0:
-      var xHyperlinks = xSheet.newEmptyChild(NsMain\"hyperlinks")
+      var xHyperlinks = xSheet.newXlNode(NsMain\"hyperlinks")
       for (name, id) in hyperlinks:
-        xHyperlinks.addEmptyChild(NsMain\"hyperlink", -1,
+        discard xHyperlinks.addChildXlNode(NsMain\"hyperlink", -1,
           {"ref": name, "r:id": id}
         )
 
-      xSheet.replaceChild(xHyperlinks)
+      xSheet.replace(xHyperlinks)
 
     else:
-      xSheet.deleteChild(NsMain\"hyperlinks")
+      xSheet.delete(NsMain\"hyperlinks")
 
     # write sheetProtection
     xs.protection.save(xSheet.child(NsMain\"sheetProtection"))
@@ -2494,7 +2096,7 @@ proc saveSheets(xw: XlWorkbook) =
     if xs.color != default(XlColor):
       validate(xs.color, error=true)
       xSheet.editChild(NsMain\"sheetPr", xSheetPr, 0):
-        xSheetPr.replaceChild(xSheetPr.newChildColor(NsMain\"tabColor", xs.color))
+        xSheetPr.replace(xSheetPr.newChildColor(NsMain\"tabColor", xs.color))
 
     # clear tabSelected
     if index != xw.active and xSheet.hasChild(NsMain\"sheetViews", xSheetViews):
@@ -2515,8 +2117,8 @@ proc saveSheetRecords(xw: XlWorkbook, mime = MimeSheetMain): seq[(string, XlObje
   xWorkbook.addNameSpace(NsDocumentRelationships, "r")
   xWorkbook.expand(NsMain, order)
 
-  var xSheets = xWorkbook.newEmptyChild(NsMain\"sheets")
-  xWorkbook.replaceChild(xSheets)
+  var xSheets = xWorkbook.newXlNode(NsMain\"sheets")
+  xWorkbook.replace(xSheets)
 
   var
     rels: XlRels
@@ -2534,7 +2136,7 @@ proc saveSheetRecords(xw: XlWorkbook, mime = MimeSheetMain): seq[(string, XlObje
     let rid = rels.add(TypeWorksheet, Xl/target)
     types.add(/Xl/target, MimeWorksheet, true)
 
-    var xSheet = xSheets.addEmptyChild(NsMain\"sheet", -1,
+    var xSheet = xSheets.addChildXlNode(NsMain\"sheet", -1,
       {"name": sheet.name, "sheetId": $id, "r:id": rid}
     )
     if sheet.hidden:
@@ -2608,25 +2210,25 @@ proc createStyles(xw: XlWorkbook) =
   xw.rels.add(TypeStyles, "styles.xml")
   xw.types.add(/Styles, MimeStyles, true)
 
-  var xStyleSheet = newEmptyNode(NsMain, "styleSheet")
-  var xFonts = xStyleSheet.addEmptyChild(NsMain\"fonts")
-  xFonts.addEmptyChild(NsMain\"font")
+  var xStyleSheet = newXlRootNode(NsMain\"styleSheet")
+  var xFonts = xStyleSheet.addChildXlNode(NsMain\"fonts")
+  discard xFonts.addChildXlNode(NsMain\"font")
   xFonts.updateCount()
 
-  var xFills = xStyleSheet.addEmptyChild(NsMain\"fills")
+  var xFills = xStyleSheet.addChildXlNode(NsMain\"fills")
   var xFill: XlNode
-  xFill = xFills.addEmptyChild(NsMain\"fill")
-  xFill.addEmptyChild(NsMain\"patternFill", -1, {"patternType": "none"})
-  xFill = xFills.addEmptyChild(NsMain\"fill")
-  xFill.addEmptyChild(NsMain\"patternFill", -1, {"patternType": "none"})
+  xFill = xFills.addChildXlNode(NsMain\"fill")
+  discard xFill.addChildXlNode(NsMain\"patternFill", -1, {"patternType": "none"})
+  xFill = xFills.addChildXlNode(NsMain\"fill")
+  discard xFill.addChildXlNode(NsMain\"patternFill", -1, {"patternType": "none"})
   xFills.updateCount()
 
-  var xBorders = xStyleSheet.addEmptyChild(NsMain\"borders")
-  xBorders.addEmptyChild(NsMain\"border")
+  var xBorders = xStyleSheet.addChildXlNode(NsMain\"borders")
+  discard xBorders.addChildXlNode(NsMain\"border")
   xFills.updateCount()
 
-  var xCellXfs = xStyleSheet.addEmptyChild(NsMain\"cellXfs")
-  xCellXfs.addEmptyChild(NsMain\"xf", -1,
+  var xCellXfs = xStyleSheet.addChildXlNode(NsMain\"cellXfs")
+  discard xCellXfs.addChildXlNode(NsMain\"xf", -1,
     {"numFmtId": "0", "fontId": "0", "fillId": "0", "borderId": "0", "xfId": "0"}
   )
   xCellXfs.updateCount()
@@ -2637,15 +2239,15 @@ proc createSharedStrings(xw: XlWorkbook) =
   xw.rels.add(TypeSharedStrings, "sharedStrings.xml")
   xw.types.add(/SharedStrings, MimeSharedStrings, true)
 
-  xw.contents[SharedStrings] = newXlObject(newEmptyNode(NsMain, "sst"))
+  xw.contents[SharedStrings] = newXlObject(newXlRootNode(NsMain\"sst"))
 
 proc createProperties(xw: XlWorkbook) =
   if DocPropsCore notin xw.contents:
-    var xCoreProp = newEmptyNode(NsCoreProperties, "coreProperties", "cp")
+    var xCoreProp = newXlRootNode(NsCoreProperties\"coreProperties", "cp")
     xw.contents[DocPropsCore] = newXlObject(xCoreProp)
 
   if DocPropsApp notin xw.contents:
-    var xExtendedProp = newEmptyNode(NsExtendedProperties, "Properties")
+    var xExtendedProp = newXlRootNode(NsExtendedProperties\"Properties")
     xw.contents[DocPropsApp] = newXlObject(xExtendedProp)
 
 proc load*(path: string, experimental = false): XlWorkbook =
@@ -2758,9 +2360,9 @@ proc contains*(xs: XlSheet, rc: XlRC): bool {.inline.} =
   result = rc in xs.cells
 
 proc newSheet(xw: XlWorkbook, name: string): XlSheet =
-  var xSheet = newEmptyNode(NsMain, "worksheet")
+  var xSheet = newXlRootNode(NsMain\"worksheet")
   xSheet.addNameSpace(NsDocumentRelationships, "r")
-  xSheet.addEmptyChild(NsMain\"sheetData")
+  discard xSheet.addChildXlNode(NsMain\"sheetData")
 
   result = XlSheet(
     workbook: xw,
@@ -2786,9 +2388,9 @@ proc newWorkbook*(experimental = false): XlWorkbook =
   rels.add(TypeExtendedProperties, DocPropsApp)
   result.contents["_rels/.rels"] = newXlObject(rels.save())
 
-  var xWorkbook = newEmptyNode(NsMain, "workbook")
+  var xWorkbook = newXlRootNode(NsMain\"workbook")
   xWorkbook.addNameSpace(NsDocumentRelationships, "r")
-  xWorkbook.addEmptyChild(NsMain\"sheets")
+  discard xWorkbook.addChildXlNode(NsMain\"sheets")
   result.contents[Workbook] = newXlObject(xWorkbook)
 
   result.createSharedStrings()
@@ -2925,27 +2527,26 @@ iterator cells*(xw: XlWorkbook, index: int): XlCell =
   let
     root = xs.getRootXlNode()
     sheetData = xs.extractSheetData(root, remove=false)
-    cTag = root.nsname(NsMain\"c")
-    fTag = root.nsname(NsMain\"f")
-    vTag = root.nsname(NsMain\"v")
+    cTag = nsnameToRawName(root, NsMain\"c")
+    fTag = nsnameToRawName(root, NsMain\"f")
+    vTag = nsnameToRawName(root, NsMain\"v")
+    isTag = nsnameToRawName(root, NsMain\"is")
 
-  if sheetData == "":
-    raise newException(XlError, "XML parsing error")
+  if sheetData != "":
+    var
+      x: XmlParser
+      errors: seq[string]
 
-  var
-    x: XmlParser
-    errors: seq[string]
+    open(x, newStringStream(sheetData), "xml", {reportWhitespace})
+    x.next()
+    defer: x.close()
 
-  open(x, newStringStream(sheetData), "xml", {reportWhitespace})
-  x.next()
-  defer: x.close()
-
-  while x.find([cTag]) >= 0:
-    let xml = x.parse(errors)
-    if xml != nil:
-      let cell = parseCell(xs, xml, fTag, vTag, readonly=true)
-      if cell != nil:
-        yield cell
+    while x.find([cTag]) >= 0:
+      let xn = x.parse(errors)
+      if xn != nil:
+        let cell = parseCell(xs, xn, fTag, vTag, isTag, readonly=true)
+        if cell != nil:
+          yield cell
 
 iterator cells*(xw: XlWorkbook, name: string): XlCell =
   ## The fastest way to iterate over cells of a sheet.
@@ -3022,8 +2623,8 @@ proc copy*(xs: XlSheet, name = ""): XlSheet {.discardable.} =
   sheet.parse()
 
   # todo: copy drawing of a sheet?
-  sheet.obj.xn.deleteChild(NsMain\"drawing")
-  sheet.obj.xn.deleteChild(NsMain\"legacyDrawing")
+  sheet.obj.xn.delete(NsMain\"drawing")
+  sheet.obj.xn.delete(NsMain\"legacyDrawing")
 
   xw.sheets.insert(sheet, index + 1)
   return sheet
