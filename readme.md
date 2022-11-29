@@ -12,7 +12,7 @@ Xl is pure nim library to create, read, and modify open XML spreadsheet (Excel) 
 - All styles are supported (number format, font, fill, border, alignment, and protection).
 
 ## Examples
-An hello world program:
+A hello world program:
 ```nim
 import xl
 

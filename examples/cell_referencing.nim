@@ -11,7 +11,7 @@ import xl
 import std/strformat
 
 var workbook = newWorkbook()
-var sheet = workbook.add("ReferencingSheet1")
+var sheet = workbook.add("Referencing")
 
 # Adjust the column width.
 for i in 0..<1024:
