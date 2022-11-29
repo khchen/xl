@@ -1,7 +1,7 @@
 #====================================================================
 #
 #         Xl - Open XML Spreadsheet (Excel) Library for Nim
-#                  Copyright (c) 2022 Ward
+#               Copyright (c) Chen Kai-Hung, Ward
 #
 #====================================================================
 
@@ -11,7 +11,7 @@ import xl
 import std/strformat
 
 var workbook = newWorkbook()
-var sheet = workbook.add("ReferencingSheet1")
+var sheet = workbook.add("Referencing")
 
 # Adjust the column width.
 for i in 0..<1024:

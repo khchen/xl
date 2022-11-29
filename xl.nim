@@ -1,7 +1,7 @@
 #====================================================================
 #
 #         Xl - Open XML Spreadsheet (Excel) Library for Nim
-#                  Copyright (c) 2022 Ward
+#               Copyright (c) Chen Kai-Hung, Ward
 #
 #====================================================================
 
@@ -3060,7 +3060,7 @@ proc collecttion*(xr: XlRange): XlCollection {.inline.} =
 
 proc add*(xco: XlCollection, c: XlRC|XlRCRC|XlCell|XlRange|string, includeEmpty=true) =
   ## Add a cell or a range into a collection.
-  ## By includeEmpty is false, only nonempty cells will be added.
+  ## If includeEmpty is false, only cells that actually in working area will be added.
   when c is XlRC:
     if includeEmpty or c in xco.sheet:
       xco.rcs.incl c
@@ -3236,6 +3236,7 @@ proc move*(xr: XlRange, to: XlRC|string) {.inline.} =
 
 proc copy*(xr: XlRange, to: XlRC|string) {.inline.} =
   ## Copy a range.
+  ## Notice: cell reference in formulas and tables won't be chnaged.
   when to is string:
     movecopy(xr, to.rc, isMove=false)
   else:
