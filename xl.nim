@@ -15,7 +15,7 @@
 import xl/private/xn
 import zippy/ziparchives
 import std/[strutils, os, tables, options, strscans, strtabs, algorithm,
-  critbits, sets, hashes, streams, times]
+  critbits, sets, hashes, streams, times, math]
 
 template `/`(x: string): string =
   '/' & x
@@ -3462,10 +3462,13 @@ proc `number=`*[T: SomeNumber](x: XlRange, data: openArray[T]) {.inline.} =
 
 proc date*(xc: XlCell): DateTime =
   ## Assume the number of cell is a date and return it.
-  ## Using 1900 date system: a serial number that represents the number of days
-  ## elapsed since January 1, 1900.
-  result = dateTime(1900, mJan, 1)
-  result += initDuration(seconds = int(xc.number * 86400))
+  ## Using 1900 compatibility date system: a serial number that represents the number of days
+  ## elapsed since December, 31st 1899. It also (wrongly) counts 1900 as a leap year.
+  result = dateTime(1899, mDec, 31) 
+  var (nDays, dayFraction) = splitDecimal(xc.number)
+  if nDays >= 61:
+    nDays -= 1
+  result += int(nDays).days + int(round(dayFraction * 86400, 0)).seconds
 
 proc `date=`*(x: XlRange|XlCollection|XlCell, date: DateTime) =
   ## Set the date of a cell, or all cells in range or collection.
